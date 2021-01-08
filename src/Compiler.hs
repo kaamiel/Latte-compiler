@@ -7,6 +7,6 @@ import Backend.CodeGenerator (generateCode)
 
 compile :: String -> IO String
 compile source = do
-    program <- parse source
-    analyze program
-    generateCode program
+    inputProgram <- parse source
+    (correctProgram, functions) <- analyze inputProgram
+    return $ generateCode correctProgram functions

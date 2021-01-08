@@ -1,4 +1,4 @@
-module Frontend.ConstExprOptimizer where
+module Frontend.Optimizer where
 
 import AbsLatte
 import Frontend.Utils
@@ -50,56 +50,76 @@ optimizeExpr e
     | otherwise         = e
 
 
-optimizeStmt :: Stmt a -> Stmt a
+reachable :: (Stmt a, Int) -> Bool
+reachable (BStmt _ _, k)        = k <= 1
+reachable (Ret _ _, k)          = k <= 1
+reachable (VRet _, k)           = k <= 1
+reachable (Cond _ _ _, k)       = k <= 1
+reachable (CondElse _ _ _ _, k) = k <= 1
+reachable (While _ _ _, k)      = k <= 1
+reachable (_, k)                = k < 1
 
-optimizeStmt (BStmt location1 (Block location2 stmts)) = BStmt location1 (Block location2 $ map optimizeStmt stmts)
 
-optimizeStmt (Decl location t items) =
-    Decl location t $ map optimizeItem items
+optimizeStmtAcc :: (Stmt a, Int) -> Stmt a -> (Stmt a, Int)
+
+optimizeStmtAcc (_, k) (BStmt location1 (Block location2 stmts)) =
+    (BStmt location1 (Block location2 optimizedStmts), k')
+    where
+        reachableStmtsAndKs = takeWhile reachable $ scanl optimizeStmtAcc (Empty location1, k) stmts
+        getStmtsAndK :: [(Stmt a, Int)] -> ([Stmt a], Int)
+        getStmtsAndK [] = ([], k)
+        getStmtsAndK prefix = (map fst prefix, snd $ last prefix)
+        (optimizedStmts, k') = getStmtsAndK reachableStmtsAndKs
+
+optimizeStmtAcc (_, k) (Decl location t items) =
+    (Decl location t $ map optimizeItem items, k)
     where
         optimizeItem :: Item a -> Item a
         optimizeItem (Init l x e) = Init l x $ optimizeExpr e
         optimizeItem noInitItem   = noInitItem
 
-optimizeStmt (Ass location x e) = Ass location x $ optimizeExpr e
+optimizeStmtAcc (_, k) (Ass location x e) = (Ass location x $ optimizeExpr e, k)
 
-optimizeStmt (Ret location e) = Ret location $ optimizeExpr e
+optimizeStmtAcc (_, k) (Ret location e) = (Ret location $ optimizeExpr e, k + 1)
 
-optimizeStmt (Cond location conditionExpr thenStmt) =
+optimizeStmtAcc (_, k) (VRet location) = (VRet location, k + 1)
+
+optimizeStmtAcc (_, k) (Cond location conditionExpr thenStmt) =
     case optimizedConditionExpr of
-        ELitTrue _  -> optimizedThenStmt
-        ELitFalse _ -> Empty location
-        _           -> Cond location optimizedConditionExpr optimizedThenStmt
+        ELitTrue _  -> (optimizedThenStmt, k')
+        ELitFalse _ -> (Empty location, k)
+        _           -> (Cond location optimizedConditionExpr optimizedThenStmt, k)
     where
-        optimizedConditionExpr = optimizeExpr conditionExpr
-        optimizedThenStmt      = optimizeStmt thenStmt
+        optimizedConditionExpr  = optimizeExpr conditionExpr
+        (optimizedThenStmt, k') = optimizeStmtAcc (thenStmt, k) thenStmt
 
-optimizeStmt (CondElse location conditionExpr thenStmt elseStmt) =
+optimizeStmtAcc (_, k) (CondElse location conditionExpr thenStmt elseStmt) =
     case optimizedConditionExpr of
-        ELitTrue _  -> optimizedThenStmt
-        ELitFalse _ -> optimizedElseStmt
-        _           -> CondElse location optimizedConditionExpr optimizedThenStmt optimizedElseStmt
+        ELitTrue _  -> (optimizedThenStmt, k1')
+        ELitFalse _ -> (optimizedElseStmt, k2')
+        _           -> (CondElse location optimizedConditionExpr optimizedThenStmt optimizedElseStmt, min k1' k2')
     where
-        optimizedConditionExpr = optimizeExpr conditionExpr
-        optimizedThenStmt      = optimizeStmt thenStmt
-        optimizedElseStmt      = optimizeStmt elseStmt
+        optimizedConditionExpr   = optimizeExpr conditionExpr
+        (optimizedThenStmt, k1') = optimizeStmtAcc (thenStmt, k) thenStmt
+        (optimizedElseStmt, k2') = optimizeStmtAcc (elseStmt, k) elseStmt
 
-optimizeStmt (While location conditionExpr bodyStmt) =
+optimizeStmtAcc (_, k) (While location conditionExpr bodyStmt) =
     case optimizedConditionExpr of
-        ELitFalse _ -> Empty location
-        _           -> While location optimizedConditionExpr optimizedBodyStmt
+        ELitFalse _ -> (Empty location, k)
+        ELitTrue _  -> (While location optimizedConditionExpr optimizedBodyStmt, 1)
+        _           -> (While location optimizedConditionExpr optimizedBodyStmt, k)
     where
-        optimizedConditionExpr = optimizeExpr conditionExpr
-        optimizedBodyStmt      = optimizeStmt bodyStmt
+        optimizedConditionExpr  = optimizeExpr conditionExpr
+        (optimizedBodyStmt, _) = optimizeStmtAcc (bodyStmt, k) bodyStmt
 
-optimizeStmt (SExp location e) = SExp location $ optimizeExpr e
+optimizeStmtAcc (_, k) (SExp location e) = (SExp location $ optimizeExpr e, k)
 
-optimizeStmt stmt = stmt
+optimizeStmtAcc (_, k) stmt = (stmt, k)
 
 
 optimizeProgram :: Program a -> Program a
 optimizeProgram (Program location topDefs) =
     Program location (map optimizeTopDef topDefs)
     where
-        optimizeTopDef :: TopDef a -> TopDef a
-        optimizeTopDef (FnDef location returnType name args (Block location2 stmts)) = FnDef location returnType name args (Block location2 $ map optimizeStmt stmts)
+        optimizeTopDef (FnDef location returnType name args (Block location2 stmts)) = FnDef location returnType name args (Block location2 $ optimizeStmts stmts)
+        optimizeStmts = map fst . takeWhile reachable . scanl optimizeStmtAcc (Empty location, 0)

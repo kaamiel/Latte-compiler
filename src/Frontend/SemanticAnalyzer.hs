@@ -10,21 +10,21 @@ import Control.Monad.Except
 import Control.Monad.State
 import AbsLatte
 import Frontend.Utils
-import Frontend.ConstExprOptimizer
+import Frontend.Optimizer
 
 
 data Error
     = Error SourceLocation String
   deriving Show
 
-data SemanticAnalyzeState = SemanticAnalyzeState
+data SemanticAnalysisState = SemanticAnalysisState
     { functions :: Map.Map Ident (Type SourceLocation) -- map function name ~> Fun a (Type a) [Type a]
     , variables :: Map.Map Ident (Type SourceLocation) -- map variable name ~> Int a | Str a | Bool a
     , variablesDeclaredInCurrentBlock :: Set.Set Ident -- set of variable names
     , currentFunctionReturnType :: Type SourceLocation -- Int a | Str a | Bool a | Void a
     }
 
-type AnalyzerStateT = StateT SemanticAnalyzeState (Except Error)
+type AnalyzerStateT = StateT SemanticAnalysisState (Except Error)
 
 
 noLocation :: SourceLocation
@@ -49,9 +49,9 @@ declaredFunctions (Program _ topDefs) = do
             checkArgs args
             return (name, Fun location returnType $ map argToType args)
         checkArgs :: [Arg SourceLocation] -> Except Error ()
-        checkArgs args = foldM_ checkArg Set.empty args
-        checkArg :: Set.Set Ident -> Arg SourceLocation -> Except Error (Set.Set Ident)
-        checkArg set (Arg location t name@(Ident ident)) = do
+        checkArgs args = foldM_ checkArgAcc Set.empty args
+        checkArgAcc :: Set.Set Ident -> Arg SourceLocation -> Except Error (Set.Set Ident)
+        checkArgAcc set (Arg location t name@(Ident ident)) = do
             when (voidType t) $ throwError $ Error location "parameter type cannot be `void'"
             when (Set.member name set) $ throwError $ Error location ("redefinition of parameter `" ++ ident ++ "'")
             return $ Set.insert name set
@@ -235,7 +235,7 @@ checkProgram (Program _ topDefs) functions =
                 argNamesAndTypes = map argNameAndType args
                 variables = Map.fromList argNamesAndTypes
                 variablesDeclaredInCurrentBlock = Map.keysSet variables
-                initialState = SemanticAnalyzeState functions variables variablesDeclaredInCurrentBlock returnType
+                initialState = SemanticAnalysisState functions variables variablesDeclaredInCurrentBlock returnType
             in
             flip evalStateT initialState $ mapM_ checkStmt stmts
         argNameAndType :: Arg SourceLocation -> (Ident, Type SourceLocation)
@@ -280,18 +280,19 @@ checkReturns (Program location topDefs) =
                 unless (allPathsReturnValue $ BStmt location bodyBlock) $ throwError $ Error (sourceLocationOfBlocksLastStatement bodyBlock) "every execution path must return a value in function returning non-void"
 
 
-analyzeInternal :: Program SourceLocation -> Except Error ()
+analyzeInternal :: Program SourceLocation -> Except Error (Program SourceLocation, Map.Map Ident (Type SourceLocation))
 analyzeInternal program = do
     functions <- declaredFunctions program
     checkDeclarationOfMain functions
     checkProgram program functions
     let optimizedProgram = optimizeProgram program
     checkReturns optimizedProgram
+    return (optimizedProgram, functions)
 
-analyze :: Program SourceLocation -> IO ()
+analyze :: Program SourceLocation -> IO (Program SourceLocation, Map.Map Ident (Type SourceLocation))
 analyze program =
     case runExcept . analyzeInternal $ program of
-        Right () -> return ()
+        Right ret -> return ret
         Left (Error location message) -> do
             let l = maybe "unknown location" (\(line, column) -> "line " ++ show line ++ ", column " ++ show column) location
             hPutStrLn stderr "ERROR"
