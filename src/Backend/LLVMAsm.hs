@@ -121,7 +121,7 @@ instance Show BasicBlock where
 data Function = Function
     { name        :: Name
     , returnTy    :: Ty
-    , args        :: [(Ty, Name)]
+    , args        :: [Value]
     , basicBlocks :: [BasicBlock]
     }
 
@@ -130,9 +130,8 @@ instance Show Function where
         showHeader . showBlocks $ "}\n\n"
         where
             showHeader = showString ("define " ++ show returnTy ++ " " ++ name ++ "(") . showArgs . showString ") {\n"
-            showArgs = showString . intercalate ", " $ map showArg args
-            showArg (argTy, argName) = show argTy ++ " " ++ argName
-            showBlocks = foldr (\block -> (.) (shows block)) id basicBlocks
+            showArgs = showString . intercalate ", " $ map showTyAndValue args
+            showBlocks = foldr ((.) . shows) id basicBlocks
 
 
 typeToTy :: Type a -> Ty

@@ -47,7 +47,16 @@ optimizeExpr :: Expr a -> Expr a
 optimizeExpr e
     | isIntConstExpr e  = ELitInt (sourceLocationOfExpr e) (evalIntConstExpr e)
     | isBoolConstExpr e = (if evalBoolConstExpr e then ELitTrue else ELitFalse) (sourceLocationOfExpr e)
-    | otherwise         = e
+    | otherwise         = case e of
+                            EApp l f args      -> EApp l f $ map optimizeExpr args
+                            Neg l e1           -> Neg l $ optimizeExpr e1
+                            Not l e1           -> Not l $ optimizeExpr e1
+                            EMul l e1 mulOp e2 -> EMul l (optimizeExpr e1) mulOp (optimizeExpr e2)
+                            EAdd l e1 addOp e2 -> EAdd l (optimizeExpr e1) addOp (optimizeExpr e2)
+                            ERel a e1 relOp e2 -> ERel a (optimizeExpr e1) relOp (optimizeExpr e2)
+                            EAnd a e1 e2       -> EAnd a (optimizeExpr e1) (optimizeExpr e2)
+                            EOr a e1 e2        -> EOr a (optimizeExpr e1) (optimizeExpr e2)
+                            _                  -> e
 
 
 reachable :: (Stmt a, Int) -> Bool
@@ -112,7 +121,14 @@ optimizeStmtAcc (_, k) (While location conditionExpr bodyStmt) =
         optimizedConditionExpr  = optimizeExpr conditionExpr
         (optimizedBodyStmt, _) = optimizeStmtAcc (bodyStmt, k) bodyStmt
 
-optimizeStmtAcc (_, k) (SExp location e) = (SExp location $ optimizeExpr e, k)
+optimizeStmtAcc (_, k) (SExp location e) =
+    case e of
+        EVar _ _    -> (Empty location, k)
+        ELitInt _ _ -> (Empty location, k)
+        ELitTrue _  -> (Empty location, k)
+        ELitFalse _ -> (Empty location, k)
+        EString _ _ -> (Empty location, k)
+        _           -> (SExp location $ optimizeExpr e, k)
 
 optimizeStmtAcc (_, k) stmt = (stmt, k)
 

@@ -65,7 +65,7 @@ getlineSuccess:
     ret i8* %ret
 }
 
-define i8* @concatStrings(i8* %s1, i8* %s2) {
+define i8* @_concatStrings(i8* %s1, i8* %s2) {
     %len1 = call i64 @strlen(i8* %s1)
     %len2 = call i64 @strlen(i8* %s2)
     %sum = add i64 %len1, %len2
