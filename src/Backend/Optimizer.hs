@@ -30,43 +30,22 @@ removeUnreachableBlocks (Function name returnTy args basicBlocks) =
                 visit v visited =
                     foldr (\u acc -> if Set.member u acc then acc else visit u acc) (Set.insert v visited) (neighbours v)
 
-insertPredecessors :: Function -> Function
-insertPredecessors (Function name returnTy args basicBlocks) =
-    Function name returnTy args blocksWithPreds
-    where
-        preds :: Map.Map Label [Label]
-        preds = foldr predsAcc Map.empty basicBlocks
-        predsAcc :: BasicBlock -> Map.Map Label [Label] -> Map.Map Label [Label]
-        predsAcc (BasicBlock pred _ _ (BrConditional _ labelTrue labelFalse)) map = insertEdge labelTrue pred $ insertEdge labelFalse pred map
-        predsAcc (BasicBlock pred _ _ (BrUnconditional label)) map                = insertEdge label pred map
-        predsAcc _ map                                                            = map
-        blocksWithPreds :: [BasicBlock]
-        blocksWithPreds = map (\block -> block { predecessors = fromMaybe [] $ Map.lookup (label block) preds }) basicBlocks
+-- insertPredecessors :: Function -> Function
+-- insertPredecessors (Function name returnTy args basicBlocks) =
+--     Function name returnTy args blocksWithPreds
+--     where
+--         preds :: Map.Map Label [Label]
+--         preds = foldr predsAcc Map.empty basicBlocks
+--         predsAcc :: BasicBlock -> Map.Map Label [Label] -> Map.Map Label [Label]
+--         predsAcc (BasicBlock pred _ _ (BrConditional _ labelTrue labelFalse)) map = insertEdge labelTrue pred $ insertEdge labelFalse pred map
+--         predsAcc (BasicBlock pred _ _ (BrUnconditional label)) map                = insertEdge label pred map
+--         predsAcc _ map                                                            = map
+--         blocksWithPreds :: [BasicBlock]
+--         blocksWithPreds = map (\block -> block { predecessors = fromMaybe [] $ Map.lookup (label block) preds }) basicBlocks
 
 insertEdge :: Label -> Label -> Map.Map Label [Label] -> Map.Map Label [Label]
 insertEdge key value = Map.insertWith (++) key [value]
 
-moveAllocasToEntry :: Function -> Function
-moveAllocasToEntry (Function name returnTy args basicBlocks) =
-    Function name returnTy args basicBlocks'
-    where
-        basicBlocks' :: [BasicBlock]
-        basicBlocks' = fst $ foldr blocksAllocasAcc ([], []) basicBlocks
-        blocksAllocasAcc :: BasicBlock -> ([BasicBlock], [Instruction]) -> ([BasicBlock], [Instruction])
-        blocksAllocasAcc block (blocks, allocas) =
-            if label block == "%entry"
-            then
-                (block { instructions = allocas ++ instructions block } : blocks, [])
-            else
-                let
-                    blocksAllocas, blocksRemainder :: [Instruction]
-                    (blocksAllocas, blocksRemainder) = partition isAlloca $ instructions block
-                    isAlloca :: Instruction -> Bool
-                    isAlloca (Alloca _ _) = True
-                    isAlloca _            = False
-                in
-                (block { instructions = blocksRemainder } : blocks, blocksAllocas ++ allocas)
-
 
 optimizeFunction :: Function -> Function
-optimizeFunction = moveAllocasToEntry . removeUnreachableBlocks
+optimizeFunction = removeUnreachableBlocks

@@ -7,17 +7,22 @@ import Control.Monad.State
 import AbsLatte
 import Backend.LLVMAsm
 import Backend.Optimizer
+import Debug.Trace -- todo: remove this
 
+
+data VariableValues = VariableValues
+    { stack     :: [Value]
+    , stackSize :: Int
+    }
 
 data CodeGenerationState = CodeGenerationState
     { nextRegisterNumber      :: Int
     , nextLabelNumber         :: Int
     , currentLabel            :: Label
-    , variables               :: Map.Map Ident Value -- map variable name ~> Value
-    , functions               :: Map.Map Ident Ty    -- map function name ~> return Ty
-    , currentFunctionReturnTy :: Ty
-    , stringLiterals          :: Map.Map String Name -- map string literal ~> array constant name
-    , code                    :: [Instruction]       -- reversed list of generated instructions
+    , variables               :: Map.Map Ident VariableValues -- map variable name ~> variable values
+    , functions               :: Map.Map Ident Ty             -- map function name ~> return Ty
+    , stringLiterals          :: Map.Map String Name          -- map string literal ~> array constant name
+    , code                    :: [Instruction]                -- reversed list of generated instructions
     }
 
 type GeneratorStateT = State CodeGenerationState
@@ -47,6 +52,21 @@ freshLabel = do
 emit :: Instruction -> GeneratorStateT ()
 emit i@(Label label) = modify $ \state -> state { code = i : code state, currentLabel = label }
 emit i               = modify $ \state -> state { code = i : code state }
+
+top :: VariableValues -> Value
+top (VariableValues stack _) = head stack
+
+changeTop :: Value -> VariableValues -> VariableValues
+changeTop newTop values = values { stack = newTop : tail (stack values) }
+
+getVariableValue :: Ident -> GeneratorStateT Value
+getVariableValue x = gets $ top . fromJust . Map.lookup x . variables
+
+changeVariableValue :: Ident -> Value -> GeneratorStateT ()
+changeVariableValue x newValue = modify $ \state -> state { variables = Map.adjust (changeTop newValue) x $ variables state }
+
+setVariables :: Map.Map Ident VariableValues -> GeneratorStateT ()
+setVariables newVariables = modify $ \state -> state { variables = newVariables }
 
 
 definedStringLiterals :: Program a -> Map.Map String Name
@@ -91,14 +111,7 @@ definedStringLiterals (Program _ topDefs) =
 
 generateExpr :: Expr a -> GeneratorStateT Value
 
-generateExpr (EVar _ x) = do
-    value <- gets $ fromJust . Map.lookup x . variables
-    case value of
-        RegisterValue (Ptr ty) r -> do
-            ret <- freshRegister
-            emit $ Load ret value
-            return $ RegisterValue ty ret
-        _ -> return value
+generateExpr (EVar _ x) = getVariableValue x
 
 generateExpr (ELitInt _ n) = return $ IntegerValue n
 
@@ -114,139 +127,207 @@ generateExpr (EApp _ f@(Ident ident) args) = do
         emit $ CallVoid ("@" ++ ident) argValues
         return NoValue
     else do
-        ret <- freshRegister
-        emit $ Call ret returnTy ("@" ++ ident) argValues
-        return $ RegisterValue returnTy ret
+        r <- freshRegister
+        emit $ Call r returnTy ("@" ++ ident) argValues
+        return $ RegisterValue returnTy r
 
 generateExpr (EString _ string) = do
     let string' = if length string < 2 then string else init . tail $ string
-    ret <- freshRegister
+    r <- freshRegister
     name <- gets $ fromJust . Map.lookup string' . stringLiterals
-    emit $ Bitcast ret (length string' + 1) name
-    return $ RegisterValue (Ptr I8) ret
+    emit $ Bitcast r (length string' + 1) name
+    return $ RegisterValue (Ptr I8) r
 
-generateExpr (Neg location e) = generateExpr $ EAdd location (ELitInt location 0) (Minus location) e
+generateExpr (Neg location e) = generateIntegerBinaryOperation Sub (-) (ELitInt location 0) e
 
-generateExpr (Not location e) = generateBinaryOperation Xor e (ELitTrue location)
+generateExpr (Not location e) = generateBoolBinaryOperation Xor (/=) (ELitTrue location) e
 
-generateExpr (EMul _ e1 (Times _) e2) = generateBinaryOperation Mul e1 e2
+generateExpr (EMul _ e1 (Times _) e2) = generateIntegerBinaryOperation Mul (*) e1 e2
 
-generateExpr (EMul _ e1 (Div _) e2) = generateBinaryOperation Sdiv e1 e2
+generateExpr (EMul _ e1 (Div _) e2) = generateIntegerBinaryOperation Sdiv div e1 e2
 
-generateExpr (EMul _ e1 (Mod _) e2) = generateBinaryOperation Srem e1 e2
+generateExpr (EMul _ e1 (Mod _) e2) = generateIntegerBinaryOperation Srem mod e1 e2
 
 generateExpr (EAdd _ e1 (Plus _) e2) = do
     value1 <- generateExpr e1
     value2 <- generateExpr e2
-    ret <- freshRegister
-    case value1 of
-        RegisterValue (Ptr I8) _ -> do
-            emit $ Call ret (Ptr I8) "@_concatStrings" [value1, value2]
-            return $ RegisterValue (Ptr I8) ret
+    case (value1, value2) of
+        (IntegerValue n1, IntegerValue n2) -> return $ IntegerValue (n1 + n2)
+        (RegisterValue (Ptr I8) _, RegisterValue (Ptr I8) _) -> do
+            r <- freshRegister
+            emit $ Call r (Ptr I8) "@_concatStrings" [value1, value2]
+            return $ RegisterValue (Ptr I8) r
         _ -> do
-            emit $ Add ret value1 value2
-            return $ RegisterValue I32 ret
+            r <- freshRegister
+            emit $ Add r value1 value2
+            return $ RegisterValue I32 r
 
-generateExpr (EAdd _ e1 (Minus _) e2) = generateBinaryOperation Sub e1 e2
+generateExpr (EAdd _ e1 (Minus _) e2) = generateIntegerBinaryOperation Sub (-) e1 e2
 
 generateExpr (ERel _ e1 relOp e2) = do
     value1 <- generateExpr e1
     value2 <- generateExpr e2
-    ret <- freshRegister
-    let condition = case relOp of
-                        LTH _ -> Slt
-                        LE  _ -> Sle
-                        GTH _ -> Sgt
-                        GE  _ -> Sge
-                        EQU _ -> Eq
-                        NE _  -> Ne
-    emit $ Icmp ret condition value1 value2
-    return $ RegisterValue I1 ret
+    case (value1, value2) of
+        (RegisterValue _ r1, RegisterValue _ r2) ->
+            if r1 == r2
+            then
+                return $ BoolValue (op () ())
+            else
+                icmp value1 value2
+        (IntegerValue n1, IntegerValue n2) -> return $ BoolValue (op n1 n2)
+        (BoolValue b1, BoolValue b2) -> return $ BoolValue (op b1 b2)
+        _ -> icmp value1 value2
+    where
+        condition :: Condition
+        condition = case relOp of
+                    LTH _ -> Slt
+                    LE  _ -> Sle
+                    GTH _ -> Sgt
+                    GE  _ -> Sge
+                    EQU _ -> Eq
+                    NE _  -> Ne
+        op :: Ord b => b -> b -> Bool
+        op = case condition of
+                Slt -> (<)
+                Sle -> (<=)
+                Sgt -> (>)
+                Sge -> (>=)
+                Eq  -> (==)
+                Ne  -> (/=)
+        icmp :: Value -> Value -> GeneratorStateT Value
+        icmp value1 value2 = do
+            r <- freshRegister
+            emit $ Icmp r condition value1 value2
+            return $ RegisterValue I1 r
 
 generateExpr (EAnd _ e1 e2) = do
     value1 <- generateExpr e1
-    pred1 <- gets currentLabel
-    labelMid <- freshLabel
-    labelEnd <- freshLabel
-    emit $ BrConditional value1 labelMid labelEnd
-    emit $ Label labelMid
-    value2 <- generateExpr e2
-    pred2 <- gets currentLabel
-    emit $ BrUnconditional labelEnd
-    emit $ Label labelEnd
-    ret <- freshRegister
-    emit $ Phi ret [(BoolValue False, pred1), (value2, pred2)]
-    return $ RegisterValue I1 ret
+    case value1 of
+        BoolValue True  -> generateExpr e2
+        BoolValue False -> return value1
+        _               -> do
+            pred1 <- gets currentLabel
+            labelMid <- freshLabel
+            labelEnd <- freshLabel
+            emit $ BrConditional value1 labelMid labelEnd
+            emit $ Label labelMid
+            value2 <- generateExpr e2
+            pred2 <- gets currentLabel
+            emit $ BrUnconditional labelEnd
+            emit $ Label labelEnd
+            r <- freshRegister
+            emit $ Phi r [(BoolValue False, pred1), (value2, pred2)]
+            return $ RegisterValue I1 r
 
 generateExpr (EOr _ e1 e2) = do
     value1 <- generateExpr e1
-    pred1 <- gets currentLabel
-    labelMid <- freshLabel
-    labelEnd <- freshLabel
-    emit $ BrConditional value1 labelEnd labelMid
-    emit $ Label labelMid
-    value2 <- generateExpr e2
-    pred2 <- gets currentLabel
-    emit $ BrUnconditional labelEnd
-    emit $ Label labelEnd
-    ret <- freshRegister
-    emit $ Phi ret [(BoolValue True, pred1), (value2, pred2)]
-    return $ RegisterValue I1 ret
+    case value1 of
+        BoolValue True  -> return value1
+        BoolValue False -> generateExpr e2
+        _               -> do
+            pred1 <- gets currentLabel
+            labelMid <- freshLabel
+            labelEnd <- freshLabel
+            emit $ BrConditional value1 labelEnd labelMid
+            emit $ Label labelMid
+            value2 <- generateExpr e2
+            pred2 <- gets currentLabel
+            emit $ BrUnconditional labelEnd
+            emit $ Label labelEnd
+            r <- freshRegister
+            emit $ Phi r [(BoolValue True, pred1), (value2, pred2)]
+            return $ RegisterValue I1 r
 
-generateBinaryOperation :: (Name -> Value -> Value -> Instruction) -> Expr a -> Expr a -> GeneratorStateT Value
-generateBinaryOperation instruction arg1 arg2 = do
+generateIntegerBinaryOperation :: (Name -> Value -> Value -> Instruction) -> (Integer -> Integer -> Integer) -> Expr a -> Expr a -> GeneratorStateT Value
+generateIntegerBinaryOperation instruction op arg1 arg2 = do
     value1 <- generateExpr arg1
     value2 <- generateExpr arg2
-    ret <- freshRegister
-    emit $ instruction ret value1 value2
-    return $ RegisterValue (tyOfValue value1) ret
+    case (value1, value2) of
+        (IntegerValue n1, IntegerValue n2) -> return $ IntegerValue (op n1 n2)
+        _ -> do
+            r <- freshRegister
+            emit $ instruction r value1 value2
+            return $ RegisterValue I32 r
+
+generateBoolBinaryOperation :: (Name -> Value -> Value -> Instruction) -> (Bool -> Bool -> Bool) -> Expr a -> Expr a -> GeneratorStateT Value
+generateBoolBinaryOperation instruction op arg1 arg2 = do
+    value1 <- generateExpr arg1
+    value2 <- generateExpr arg2
+    case (value1, value2) of
+        (BoolValue b1, BoolValue b2) -> return $ BoolValue (op b1 b2)
+        _ -> do
+            r <- freshRegister
+            emit $ instruction r value1 value2
+            return $ RegisterValue I1 r
 
 
-generateBoolExpr :: Expr a -> Label -> Label -> GeneratorStateT ()
+generateBoolExpr :: Expr a -> Label -> Label -> GeneratorStateT ([Label], [Label])
 
-generateBoolExpr (EVar _ x) labelTrue labelFalse = do
-    value <- gets $ fromJust . Map.lookup x . variables
-    ret <- freshRegister
-    emit $ Load ret value
-    emit $ BrConditional (RegisterValue I1 ret) labelTrue labelFalse
+generateBoolExpr e@(EVar _ x) labelTrue labelFalse = do
+    label <- gets currentLabel
+    value <- generateExpr e
+    case value of
+        BoolValue True -> do
+            emit $ BrUnconditional labelTrue
+            return ([label], [])
+        BoolValue False -> do
+            emit $ BrUnconditional labelFalse
+            return ([], [label])
+        RegisterValue _ _ -> do
+            emit $ BrConditional value labelTrue labelFalse
+            return ([label], [label])
 
-generateBoolExpr (ELitTrue _) labelTrue _ = emit $ BrUnconditional labelTrue
+generateBoolExpr (ELitTrue _) labelTrue _ = do
+    label <- gets currentLabel
+    emit $ BrUnconditional labelTrue
+    return ([label], [])
 
-generateBoolExpr (ELitFalse _) _ labelFalse = emit $ BrUnconditional labelFalse
+generateBoolExpr (ELitFalse _) _ labelFalse = do
+    label <- gets currentLabel
+    emit $ BrUnconditional labelFalse
+    return ([], [label])
 
-generateBoolExpr (EApp _ (Ident ident) args) labelTrue labelFalse = do
-    argValues <- mapM generateExpr args
-    ret <- freshRegister
-    emit $ Call ret I1 ("@" ++ ident) argValues
-    emit $ BrConditional (RegisterValue I1 ret) labelTrue labelFalse
+generateBoolExpr e@(EApp _ _ _) labelTrue labelFalse = do
+    label <- gets currentLabel
+    value <- generateExpr e
+    emit $ BrConditional value labelTrue labelFalse
+    return ([label], [label])
 
 generateBoolExpr (Not _ e) labelTrue labelFalse = generateBoolExpr e labelFalse labelTrue
 
-generateBoolExpr (ERel _ e1 relOp e2) labelTrue labelFalse = do
-    value1 <- generateExpr e1
-    value2 <- generateExpr e2
-    ret <- freshRegister
-    let condition = case relOp of
-                        LTH _ -> Slt
-                        LE  _ -> Sle
-                        GTH _ -> Sgt
-                        GE  _ -> Sge
-                        EQU _ -> Eq
-                        NE _  -> Ne
-    emit $ Icmp ret condition value1 value2
-    emit $ BrConditional (RegisterValue I1 ret) labelTrue labelFalse
+generateBoolExpr e@(ERel _ _ _ _) labelTrue labelFalse = do
+    label <- gets currentLabel
+    value <- generateExpr e
+    case value of
+        BoolValue True -> do
+            emit $ BrUnconditional labelTrue
+            return ([label], [])
+        BoolValue False -> do
+            emit $ BrUnconditional labelFalse
+            return ([], [label])
+        RegisterValue _ _ -> do
+            emit $ BrConditional value labelTrue labelFalse
+            return ([label], [label])
 
 generateBoolExpr (EAnd _ e1 e2) labelTrue labelFalse = do
     labelMid <- freshLabel
-    generateBoolExpr e1 labelMid labelFalse
-    emit $ Label labelMid
-    generateBoolExpr e2 labelTrue labelFalse
+    (midLabels, falseLabels1) <- generateBoolExpr e1 labelMid labelFalse
+    case midLabels of
+        [] -> return ([], falseLabels1)
+        _  -> do
+            emit $ Label labelMid
+            (trueLabels, falseLabels2) <- generateBoolExpr e2 labelTrue labelFalse
+            return (trueLabels, falseLabels1 ++ falseLabels2)
 
 generateBoolExpr (EOr _ e1 e2) labelTrue labelFalse = do
     labelMid <- freshLabel
-    generateBoolExpr e1 labelTrue labelMid
-    emit $ Label labelMid
-    generateBoolExpr e2 labelTrue labelFalse
+    (trueLabels1, midLabels) <- generateBoolExpr e1 labelTrue labelMid
+    case midLabels of
+        [] -> return (trueLabels1, [])
+        _  -> do
+            emit $ Label labelMid
+            (trueLabels2, falseLabels) <- generateBoolExpr e2 labelTrue labelFalse
+            return (trueLabels1 ++ trueLabels2, falseLabels)
 
 
 generateStmt :: Stmt a -> GeneratorStateT ()
@@ -254,123 +335,168 @@ generateStmt :: Stmt a -> GeneratorStateT ()
 generateStmt (Empty _) = return ()
 
 generateStmt (BStmt _ (Block _ stmts)) = do
-    variables' <- gets variables
+    variablesBefore <- gets variables
     mapM_ generateStmt stmts
-    modify $ \state -> state { variables = variables' }
+    variablesAfter <- gets variables
+    setVariables $ Map.intersectionWith merge2 variablesAfter variablesBefore
+    where
+        merge2 :: VariableValues -> VariableValues -> VariableValues
+        merge2 valuesAfter valuesBefore
+            | stackSize valuesBefore < stackSize valuesAfter = valuesAfter { stack = tail $ stack valuesAfter }
+            | otherwise                                      = valuesAfter
 
 generateStmt (Decl location t items) =
     mapM_ generateItem items
     where
-        ty = typeToTy t
-        defaultValue = case ty of
-                            I32    -> ELitInt location 0
-                            Ptr I8 -> EString location ""
-                            I1     -> ELitFalse location
-        generateItem (NoInit location x) = generateItem (Init location x defaultValue)
-        generateItem (Init _ x e) =
-            if ty == I1
-            then
-                case e of
-                    ELitTrue _  -> do
-                        name <- freshRegister
-                        emit $ Alloca name ty
-                        doGenerateInitItem x name (BoolValue True)
-                    ELitFalse _ -> do
-                        name <- freshRegister
-                        emit $ Alloca name ty
-                        doGenerateInitItem x name (BoolValue False)
-                    _           -> do
-                        name <- freshRegister
-                        emit $ Alloca name ty
-                        labelTrue <- freshLabel
-                        labelFalse <- freshLabel
-                        labelEnd <- freshLabel
-                        generateBoolExpr e labelTrue labelFalse
-                        emit $ Label labelTrue
-                        doGenerateInitItem x name (BoolValue True)
-                        emit $ BrUnconditional labelEnd
-                        emit $ Label labelFalse
-                        doGenerateInitItem x name (BoolValue False)
-                        emit $ BrUnconditional labelEnd
-                        emit $ Label labelEnd
-            else do
-                eValue <- generateExpr e
-                name <- freshRegister
-                emit $ Alloca name ty
-                doGenerateInitItem x name eValue
-        doGenerateInitItem :: Ident -> Name -> Value -> GeneratorStateT ()
-        doGenerateInitItem ident r value = do
-            let identValue = RegisterValue (Ptr ty) r
-            modify $ \state -> state { variables = Map.insert ident identValue $ variables state }
-            emit $ Store value identValue
+        generateItem (NoInit location x) = generateItem $ Init location x defaultExpr
+        generateItem (Init _ x e) = do
+            value <- generateExpr e
+            modify $ \state -> state { variables = Map.insertWith push x (VariableValues [value] 1) $ variables state }
+        defaultExpr =
+            case t of
+                Int _  -> ELitInt location 0
+                Str _  -> EString location ""
+                Bool _ -> ELitFalse location
+        push :: VariableValues -> VariableValues -> VariableValues
+        push (VariableValues [newValue] _) values = values { stack = newValue : stack values, stackSize = stackSize values + 1 }
 
-generateStmt (Ass location x e) = do
-    xValue <- gets $ fromJust . Map.lookup x . variables
-    case xValue of
-        RegisterValue (Ptr I1) r -> do
-            case e of
-                ELitTrue _  -> emit $ Store (BoolValue True) xValue
-                ELitFalse _ -> emit $ Store (BoolValue False) xValue
-                _           -> generateStmt $ CondElse location e (Ass location x (ELitTrue location)) (Ass location x (ELitFalse location))
-        _ -> do
-            eValue <- generateExpr e
-            emit $ Store eValue xValue
+generateStmt (Ass _ x e) = do
+    value <- generateExpr e
+    changeVariableValue x value
 
 generateStmt (Incr location x) = generateStmt $ Ass location x $ EAdd location (EVar location x) (Plus location) (ELitInt location 1)
 
 generateStmt (Decr location x) = generateStmt $ Ass location x $ EAdd location (EVar location x) (Minus location) (ELitInt location 1)
 
-generateStmt (Ret location e) = do
-    returnTy <- gets currentFunctionReturnTy
-    if returnTy == I1
-    then
-        case e of
-            ELitTrue _  -> emit $ RetValue (BoolValue True)
-            ELitFalse _ -> emit $ RetValue (BoolValue False)
-            _           -> generateStmt $ CondElse location e (Ret location (ELitTrue location)) (Ret location (ELitFalse location))
-    else do
-        value <- generateExpr e
-        emit $ RetValue value
+generateStmt (Ret _ e) = do
+    value <- generateExpr e
+    emit $ RetValue value
 
 generateStmt (VRet _) = emit RetVoid
 
 generateStmt (Cond _ conditionExpr thenStmt) = do
-    labelTrue <- freshLabel
+    labelThen <- freshLabel
     labelEnd <- freshLabel
-    generateBoolExpr conditionExpr labelTrue labelEnd
-    emit $ Label labelTrue
-    generateStmt thenStmt
-    emit $ BrUnconditional labelEnd
-    emit $ Label labelEnd
+    (thenLabels, predsBegin) <- generateBoolExpr conditionExpr labelThen labelEnd
+    case thenLabels of
+        [] -> emit $ Label labelEnd
+        _  -> do
+            variablesBegin <- gets $ Map.toAscList . variables
+            emit $ Label labelThen
+            generateStmt thenStmt
+            predThen <- gets currentLabel
+            variablesThen <- gets $ Map.toAscList . variables
+            emit $ BrUnconditional labelEnd
+            emit $ Label labelEnd
+            variablesEnd <- zipWithM (merge2 predsBegin predThen) variablesBegin variablesThen
+            setVariables $ Map.fromAscList variablesEnd
+    where
+        merge2 :: [Label] -> Label -> (Ident, VariableValues) -> (Ident, VariableValues) -> GeneratorStateT (Ident, VariableValues)
+        merge2 predsBegin predThen (x, valuesBegin) (_, valuesThen) =
+            let
+                valueBegin = top valuesBegin
+                valueThen  = top valuesThen
+            in
+            if valueBegin == valueThen
+            then
+                return (x, valuesBegin)
+            else do
+                r <- freshRegister
+                emit $ Phi r $ (valueThen, predThen) : map ((,) valueBegin) predsBegin
+                return (x, changeTop (RegisterValue (tyOfValue valueBegin) r) valuesBegin)
 
 generateStmt (CondElse _ conditionExpr thenStmt elseStmt) = do
-    labelTrue <- freshLabel
-    labelFalse <- freshLabel
+    labelThen <- freshLabel
+    labelElse <- freshLabel
     labelEnd <- freshLabel
-    generateBoolExpr conditionExpr labelTrue labelFalse
-    emit $ Label labelTrue
-    generateStmt thenStmt
-    emit $ BrUnconditional labelEnd
-    emit $ Label labelFalse
-    generateStmt elseStmt
-    emit $ BrUnconditional labelEnd
+    variablesBegin <- gets $ variables
+    (thenLabels, elseLabels) <- generateBoolExpr conditionExpr labelThen labelElse
+    let (generateThen, generateElse) = case (thenLabels, elseLabels) of
+                                        ([], _) -> (False, True)
+                                        (_, []) -> (True, False)
+                                        _       -> (True, True)
+    when generateThen $ do
+        emit $ Label labelThen
+        generateStmt thenStmt
+        emit $ BrUnconditional labelEnd
+    predThen <- gets currentLabel
+    variablesThen <- gets $ Map.toAscList . variables
+    when generateElse $ do
+        emit $ Label labelElse
+        setVariables variablesBegin
+        generateStmt elseStmt
+        emit $ BrUnconditional labelEnd
+    predElse <- gets currentLabel
+    variablesElse <- gets $ Map.toAscList . variables
     emit $ Label labelEnd
+    when (generateThen && generateElse) $ do
+        variablesEnd <- sequence $ zipWith3 (merge3 predThen predElse) (Map.toAscList variablesBegin) variablesThen variablesElse
+        setVariables $ Map.fromAscList variablesEnd
+    where
+        merge3 :: Label -> Label -> (Ident, VariableValues) -> (Ident, VariableValues) -> (Ident, VariableValues) -> GeneratorStateT (Ident, VariableValues)
+        merge3 predThen predElse (x, valuesBegin) (_, valuesThen) (_, valuesElse) =
+            let
+                valueBegin = top valuesBegin
+                valueThen  = top valuesThen
+                valueElse  = top valuesElse
+            in
+            if valueBegin == valueThen && valueThen == valueElse
+            then
+                return (x, valuesBegin)
+            else do
+                r <- freshRegister
+                emit $ Phi r [(valueThen, predThen), (valueElse, predElse)]
+                return (x, changeTop (RegisterValue (tyOfValue valueBegin) r) valuesBegin)
 
 generateStmt (While _ conditionExpr bodyStmt) = do
-    labelBody <- freshLabel
-    labelCondition <- freshLabel
-    labelEnd <- freshLabel
-    emit $ BrUnconditional labelCondition
-    emit $ Label labelBody
-    generateStmt bodyStmt
-    emit $ BrUnconditional labelCondition
-    emit $ Label labelCondition
-    generateBoolExpr conditionExpr labelBody labelEnd
-    emit $ Label labelEnd
+    state <- get
+    unless (evalState (generateExpr conditionExpr) state == BoolValue False) $ do
+        predBegin <- gets currentLabel
+        labelBody <- freshLabel
+        labelCondition <- freshLabel
+        labelEnd <- freshLabel
+        variablesBegin <- gets $ Map.toAscList . variables
+        variablesBeginRegisters <- mapM toRegisterValue variablesBegin
+        state' <- gets $ \state -> state { variables = Map.fromAscList variablesBeginRegisters }
+        variablesBodyBefore <- sequence $ zipWith3 mergeBefore variablesBeginRegisters (Map.toAscList . variables . flip execState state' $ generateStmt bodyStmt) variablesBegin
+        emit $ BrUnconditional labelCondition
+        emit $ Label labelBody
+        setVariables $ Map.fromAscList variablesBodyBefore
+        generateStmt bodyStmt
+        predBody <- gets currentLabel
+        variablesBodyAfter <- gets $ Map.toAscList . variables
+        emit $ BrUnconditional labelCondition
+        emit $ Label labelCondition
+        setVariables $ Map.fromAscList variablesBodyBefore
+        sequence_ $ zipWith3 (mergeAfter predBegin predBody) variablesBegin variablesBodyAfter variablesBodyBefore
+        generateBoolExpr conditionExpr labelBody labelEnd
+        emit $ Label labelEnd
+    where
+        toRegisterValue :: (Ident, VariableValues) -> GeneratorStateT (Ident, VariableValues)
+        toRegisterValue (x, values) =
+            case top values of
+                RegisterValue _ _ -> return (x, values)
+                _ -> do
+                    r <- freshRegister
+                    return (x, changeTop (RegisterValue (tyOfValue $ top values) r) values)
+        mergeBefore :: (Ident, VariableValues) -> (Ident, VariableValues) -> (Ident, VariableValues) -> GeneratorStateT (Ident, VariableValues)
+        mergeBefore (x, valuesBeginRegister) (_, valuesBody) (_, valuesBegin)
+            | top valuesBeginRegister == top valuesBody  = return (x, valuesBegin)
+            | top valuesBeginRegister /= top valuesBegin = return (x, valuesBeginRegister)
+            | otherwise = do
+                r <- freshRegister
+                return (x, changeTop (RegisterValue (tyOfValue $ top valuesBeginRegister) r) valuesBeginRegister)
+        mergeAfter :: Label -> Label -> (Ident, VariableValues) -> (Ident, VariableValues) -> (Ident, VariableValues) -> GeneratorStateT ()
+        mergeAfter predBegin predBody (_, valuesBegin) (_, valuesBodyAfter) (_, valuesBodyBefore) =
+            let
+                valueBegin = top valuesBegin
+                valueBodyAfter = top valuesBodyAfter
+            in
+            unless (valueBegin == valueBodyAfter) $ do
+                let RegisterValue _ r = top valuesBodyBefore
+                emit $ Phi r [(valueBegin, predBegin), (valueBodyAfter, predBody)]
 
-generateStmt (SExp _ e) = do
-    generateExpr e
-    return ()
+generateStmt (SExp _ e) = generateExpr e >> return ()
 
 
 generateTopDef :: Map.Map Ident Ty -> Map.Map String Name -> TopDef a -> Function
@@ -394,13 +520,11 @@ generateTopDef functions stringLiterals (FnDef _ returnType (Ident ident) args (
         isTerminator Unreachable           = True
         isTerminator _                     = False
         initialState :: CodeGenerationState
-        initialState = CodeGenerationState 0 0 "%entry" variables functions returnTy stringLiterals initialInstructions
-        variables :: Map.Map Ident Value
-        variables = Map.fromList $ map (\(ident, RegisterValue ty r) -> (ident, RegisterValue (Ptr ty) (r ++ "_ptr"))) argList
+        initialState = CodeGenerationState 0 0 "%entry" variables functions stringLiterals [Label "%entry"]
+        variables :: Map.Map Ident VariableValues
+        variables = Map.fromList $ map (\(ident, value) -> (ident, VariableValues [value] 1)) argList
         argList :: [(Ident, Value)]
         argList = map (\(Arg _ t ident@(Ident name)) -> (ident, RegisterValue (typeToTy t) ("%" ++ name))) args
-        initialInstructions :: [Instruction]
-        initialInstructions = foldr (\arg@(RegisterValue ty r) acc -> Store arg (RegisterValue (Ptr ty) (r ++ "_ptr")) : Alloca (r ++ "_ptr") ty : acc) [Label "%entry"] (map snd argList)
         returnTy :: Ty
         returnTy = typeToTy returnType
 

@@ -29,6 +29,7 @@ data Value
     | RegisterValue Ty Name
     | IntegerValue Integer
     | BoolValue Bool
+  deriving Eq
 
 instance Show Value where
     show NoValue             = ""
@@ -61,9 +62,6 @@ data Instruction
     | Icmp Name Condition Value Value
     | BrConditional Value Label Label
     | BrUnconditional Label
-    | Alloca Name Ty
-    | Load Name Value
-    | Store Value Value
     | CallVoid Name [Value]
     | Call Name Ty Name [Value]
     | Phi Name [(Value, Label)]
@@ -81,12 +79,9 @@ instance Show Instruction where
     show (Xor result op1 op2)                       = unwords [result, "= xor", showTyAndValue op1, ",", show op2]
     show RetVoid                                    = "ret void"
     show (RetValue value)                           = unwords ["ret", showTyAndValue value]
-    show (Icmp result cond op1 op2)                 = unwords [result, "= icmp", show cond, showTyAndValue op1, ",", show op2]
+    show (Icmp result contidion op1 op2)            = unwords [result, "= icmp", show contidion, showTyAndValue op1, ",", show op2]
     show (BrConditional cond labelTrue labelFalse)  = unwords ["br i1", show cond, ", label", labelTrue, ", label", labelFalse]
     show (BrUnconditional label)                    = unwords ["br label", label]
-    show (Alloca result ty)                         = unwords [result, "= alloca", show ty]
-    show (Load result (RegisterValue (Ptr ty) r))   = unwords [result, "= load", show ty, ",", show $ Ptr ty, r]
-    show (Store value (RegisterValue (Ptr ty) r))   = unwords ["store", show ty, show value, ",", show $ Ptr ty, r]
     show (CallVoid name args)                       = unwords ["call void", name, "(", intercalate ", " (map showTyAndValue args), ")"]
     show (Call result ty name args)                 = unwords [result, "= call", show ty, name, "(", intercalate ", " (map showTyAndValue args), ")"]
     show (Phi result values)                        =
