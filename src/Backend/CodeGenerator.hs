@@ -1,7 +1,7 @@
 module Backend.CodeGenerator (generateCode) where
 
 import qualified Data.Map as Map
-import Data.List (foldl')
+import Data.List (foldl', sort)
 import Data.Maybe
 import Control.Monad.State
 import AbsLatte
@@ -16,13 +16,14 @@ data VariableValues = VariableValues
     }
 
 data CodeGenerationState = CodeGenerationState
-    { nextRegisterNumber      :: Int
-    , nextLabelNumber         :: Int
-    , currentLabel            :: Label
-    , variables               :: Map.Map Ident VariableValues -- map variable name ~> variable values
-    , functions               :: Map.Map Ident Ty             -- map function name ~> return Ty
-    , stringLiterals          :: Map.Map String Name          -- map string literal ~> array constant name
-    , code                    :: [Instruction]                -- reversed list of generated instructions
+    { nextRegisterNumber :: Int
+    , nextLabelNumber    :: Int
+    , currentLabel       :: Label
+    , variables          :: Map.Map Ident VariableValues -- map variable name ~> variable values
+    , functions          :: Map.Map Ident Ty             -- map function name ~> return Ty
+    , stringLiterals     :: Map.Map String Name          -- map string literal ~> array constant name
+    , code               :: [Instruction]                -- reversed list of generated instructions
+    , instructionResults :: Map.Map Instruction Name     -- map instruction ~> name of register with result
     }
 
 type GeneratorStateT = State CodeGenerationState
@@ -53,8 +54,32 @@ emit :: Instruction -> GeneratorStateT ()
 emit i@(Label label) = modify $ \state -> state { code = i : code state, currentLabel = label }
 emit i               = modify $ \state -> state { code = i : code state }
 
+emitWithGCSE :: Instruction -> GeneratorStateT Name
+emitWithGCSE i = do
+    results <- gets instructionResults
+    maybe rememberNewResult return (Map.lookup i results)
+    where
+        rememberNewResult :: GeneratorStateT Name
+        rememberNewResult = do
+            r <- freshRegister
+            modify $ \state -> state { instructionResults = foldr (flip Map.insert r) (instructionResults state) (equalInstructions i) }
+            emit $ insertResult r i
+            return r
+        insertResult :: Name -> Instruction -> Instruction
+        insertResult r (Add _ op1 op2)            = Add r op1 op2
+        insertResult r (Sub _ op1 op2)            = Sub r op1 op2
+        insertResult r (Mul _ op1 op2)            = Mul r op1 op2
+        insertResult r (Sdiv _ op1 op2)           = Sdiv r op1 op2
+        insertResult r (Srem _ op1 op2)           = Srem r op1 op2
+        insertResult r (Xor _ op1 op2)            = Xor r op1 op2
+        insertResult r (Icmp _ contidion op1 op2) = Icmp r contidion op1 op2
+        insertResult r (Call _ ty name args)      = Call r ty name args
+        insertResult r (Phi _ values)             = Phi r values
+        insertResult r (Bitcast _ n pointer)      = Bitcast r n pointer
+        insertResult _ i                          = i
+
 top :: VariableValues -> Value
-top (VariableValues stack _) = head stack
+top = head . stack
 
 changeTop :: Value -> VariableValues -> VariableValues
 changeTop newTop values = values { stack = newTop : tail (stack values) }
@@ -133,9 +158,8 @@ generateExpr (EApp _ f@(Ident ident) args) = do
 
 generateExpr (EString _ string) = do
     let string' = if length string < 2 then string else init . tail $ string
-    r <- freshRegister
     name <- gets $ fromJust . Map.lookup string' . stringLiterals
-    emit $ Bitcast r (length string' + 1) name
+    r <- emitWithGCSE $ Bitcast "_" (length string' + 1) name
     return $ RegisterValue (Ptr I8) r
 
 generateExpr (Neg location e) = generateIntegerBinaryOperation Sub (-) (ELitInt location 0) e
@@ -154,12 +178,10 @@ generateExpr (EAdd _ e1 (Plus _) e2) = do
     case (value1, value2) of
         (IntegerValue n1, IntegerValue n2) -> return $ IntegerValue (n1 + n2)
         (RegisterValue (Ptr I8) _, RegisterValue (Ptr I8) _) -> do
-            r <- freshRegister
-            emit $ Call r (Ptr I8) "@_concatStrings" [value1, value2]
+            r <- emitWithGCSE $ Call "_" (Ptr I8) "@_concatStrings" [value1, value2]
             return $ RegisterValue (Ptr I8) r
         _ -> do
-            r <- freshRegister
-            emit $ Add r value1 value2
+            r <- emitWithGCSE $ Add "_" value1 value2
             return $ RegisterValue I32 r
 
 generateExpr (EAdd _ e1 (Minus _) e2) = generateIntegerBinaryOperation Sub (-) e1 e2
@@ -196,8 +218,7 @@ generateExpr (ERel _ e1 relOp e2) = do
                 Ne  -> (/=)
         icmp :: Value -> Value -> GeneratorStateT Value
         icmp value1 value2 = do
-            r <- freshRegister
-            emit $ Icmp r condition value1 value2
+            r <- emitWithGCSE $ Icmp "_" condition value1 value2
             return $ RegisterValue I1 r
 
 generateExpr (EAnd _ e1 e2) = do
@@ -245,8 +266,7 @@ generateIntegerBinaryOperation instruction op arg1 arg2 = do
     case (value1, value2) of
         (IntegerValue n1, IntegerValue n2) -> return $ IntegerValue (op n1 n2)
         _ -> do
-            r <- freshRegister
-            emit $ instruction r value1 value2
+            r <- emitWithGCSE $ instruction "_" value1 value2
             return $ RegisterValue I32 r
 
 generateBoolBinaryOperation :: (Name -> Value -> Value -> Instruction) -> (Bool -> Bool -> Bool) -> Expr a -> Expr a -> GeneratorStateT Value
@@ -256,8 +276,7 @@ generateBoolBinaryOperation instruction op arg1 arg2 = do
     case (value1, value2) of
         (BoolValue b1, BoolValue b2) -> return $ BoolValue (op b1 b2)
         _ -> do
-            r <- freshRegister
-            emit $ instruction r value1 value2
+            r <- emitWithGCSE $ instruction "_" value1 value2
             return $ RegisterValue I1 r
 
 
@@ -378,18 +397,25 @@ generateStmt (Cond _ conditionExpr thenStmt) = do
     labelThen <- freshLabel
     labelEnd <- freshLabel
     (thenLabels, predsBegin) <- generateBoolExpr conditionExpr labelThen labelEnd
-    case thenLabels of
-        [] -> emit $ Label labelEnd
-        _  -> do
-            variablesBegin <- gets $ Map.toAscList . variables
-            emit $ Label labelThen
-            generateStmt thenStmt
+    let (generateThen, generateEnd) = case (thenLabels, predsBegin) of
+                                        ([], _) -> (False, False)
+                                        (_, []) -> (True, False)
+                                        _       -> (True, True)
+    if not generateThen
+    then
+        emit $ Label labelEnd
+    else do
+        variablesBegin <- gets $ Map.toAscList . variables
+        resultsBegin <- gets instructionResults
+        emit $ Label labelThen
+        generateStmt thenStmt
+        when generateEnd $ do
             predThen <- gets currentLabel
             variablesThen <- gets $ Map.toAscList . variables
             emit $ BrUnconditional labelEnd
             emit $ Label labelEnd
             variablesEnd <- zipWithM (merge2 predsBegin predThen) variablesBegin variablesThen
-            setVariables $ Map.fromAscList variablesEnd
+            modify $ \state -> state { variables = Map.fromAscList variablesEnd, instructionResults = resultsBegin }
     where
         merge2 :: [Label] -> Label -> (Ident, VariableValues) -> (Ident, VariableValues) -> GeneratorStateT (Ident, VariableValues)
         merge2 predsBegin predThen (x, valuesBegin) (_, valuesThen) =
@@ -401,15 +427,15 @@ generateStmt (Cond _ conditionExpr thenStmt) = do
             then
                 return (x, valuesBegin)
             else do
-                r <- freshRegister
-                emit $ Phi r $ (valueThen, predThen) : map ((,) valueBegin) predsBegin
+                r <- emitWithGCSE $ Phi "_" $ sort $ (valueThen, predThen) : map ((,) valueBegin) predsBegin
                 return (x, changeTop (RegisterValue (tyOfValue valueBegin) r) valuesBegin)
 
 generateStmt (CondElse _ conditionExpr thenStmt elseStmt) = do
     labelThen <- freshLabel
     labelElse <- freshLabel
     labelEnd <- freshLabel
-    variablesBegin <- gets $ variables
+    variablesBegin <- gets variables
+    resultsBegin <- gets instructionResults
     (thenLabels, elseLabels) <- generateBoolExpr conditionExpr labelThen labelElse
     let (generateThen, generateElse) = case (thenLabels, elseLabels) of
                                         ([], _) -> (False, True)
@@ -423,15 +449,15 @@ generateStmt (CondElse _ conditionExpr thenStmt elseStmt) = do
     variablesThen <- gets $ Map.toAscList . variables
     when generateElse $ do
         emit $ Label labelElse
-        setVariables variablesBegin
+        modify $ \state -> state { variables = variablesBegin, instructionResults = resultsBegin }
         generateStmt elseStmt
         emit $ BrUnconditional labelEnd
     predElse <- gets currentLabel
-    variablesElse <- gets $ Map.toAscList . variables
     emit $ Label labelEnd
     when (generateThen && generateElse) $ do
+        variablesElse <- gets $ Map.toAscList . variables
         variablesEnd <- sequence $ zipWith3 (merge3 predThen predElse) (Map.toAscList variablesBegin) variablesThen variablesElse
-        setVariables $ Map.fromAscList variablesEnd
+        modify $ \state -> state { variables = Map.fromAscList variablesEnd, instructionResults = resultsBegin }
     where
         merge3 :: Label -> Label -> (Ident, VariableValues) -> (Ident, VariableValues) -> (Ident, VariableValues) -> GeneratorStateT (Ident, VariableValues)
         merge3 predThen predElse (x, valuesBegin) (_, valuesThen) (_, valuesElse) =
@@ -444,8 +470,7 @@ generateStmt (CondElse _ conditionExpr thenStmt elseStmt) = do
             then
                 return (x, valuesBegin)
             else do
-                r <- freshRegister
-                emit $ Phi r [(valueThen, predThen), (valueElse, predElse)]
+                r <- emitWithGCSE $ Phi "_" $ sort [(valueThen, predThen), (valueElse, predElse)]
                 return (x, changeTop (RegisterValue (tyOfValue valueBegin) r) valuesBegin)
 
 generateStmt (While _ conditionExpr bodyStmt) = do
@@ -456,6 +481,7 @@ generateStmt (While _ conditionExpr bodyStmt) = do
         labelCondition <- freshLabel
         labelEnd <- freshLabel
         variablesBegin <- gets $ Map.toAscList . variables
+        resultsBegin <- gets instructionResults
         variablesBeginRegisters <- mapM toRegisterValue variablesBegin
         state' <- gets $ \state -> state { variables = Map.fromAscList variablesBeginRegisters }
         variablesBodyBefore <- sequence $ zipWith3 mergeBefore variablesBeginRegisters (Map.toAscList . variables . flip execState state' $ generateStmt bodyStmt) variablesBegin
@@ -471,6 +497,7 @@ generateStmt (While _ conditionExpr bodyStmt) = do
         sequence_ $ zipWith3 (mergeAfter predBegin predBody) variablesBegin variablesBodyAfter variablesBodyBefore
         generateBoolExpr conditionExpr labelBody labelEnd
         emit $ Label labelEnd
+        modify $ \state -> state { instructionResults = resultsBegin }
     where
         toRegisterValue :: (Ident, VariableValues) -> GeneratorStateT (Ident, VariableValues)
         toRegisterValue (x, values) =
@@ -520,7 +547,7 @@ generateTopDef functions stringLiterals (FnDef _ returnType (Ident ident) args (
         isTerminator Unreachable           = True
         isTerminator _                     = False
         initialState :: CodeGenerationState
-        initialState = CodeGenerationState 0 0 "%entry" variables functions stringLiterals [Label "%entry"]
+        initialState = CodeGenerationState 0 0 "%entry" variables functions stringLiterals [Label "%entry"] Map.empty
         variables :: Map.Map Ident VariableValues
         variables = Map.fromList $ map (\(ident, value) -> (ident, VariableValues [value] 1)) argList
         argList :: [(Ident, Value)]
