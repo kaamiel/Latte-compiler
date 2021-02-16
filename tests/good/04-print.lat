@@ -1,0 +1,9 @@
+
+int main() {
+    
+    printInt(123);
+    printString("456");
+
+    return 0;
+
+}

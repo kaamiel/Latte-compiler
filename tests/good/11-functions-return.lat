@@ -1,0 +1,25 @@
+
+string double(string s) {
+    return s + s;
+    assert(false);
+}
+
+
+int main() {
+    
+    string s = "la";
+    printString(double(s));
+
+
+    return 0;
+    assert(false);
+
+    return 0;
+
+}
+
+void assert(boolean b) {
+    if (!b) {
+        error();
+    }
+}

@@ -30,18 +30,18 @@ removeUnreachableBlocks (Function name returnTy args basicBlocks) =
                 visit v visited =
                     foldr (\u acc -> if Set.member u acc then acc else visit u acc) (Set.insert v visited) (neighbours v)
 
--- insertPredecessors :: Function -> Function
--- insertPredecessors (Function name returnTy args basicBlocks) =
---     Function name returnTy args blocksWithPreds
---     where
---         preds :: Map.Map Label [Label]
---         preds = foldr predsAcc Map.empty basicBlocks
---         predsAcc :: BasicBlock -> Map.Map Label [Label] -> Map.Map Label [Label]
---         predsAcc (BasicBlock pred _ _ (BrConditional _ labelTrue labelFalse)) map = insertEdge labelTrue pred $ insertEdge labelFalse pred map
---         predsAcc (BasicBlock pred _ _ (BrUnconditional label)) map                = insertEdge label pred map
---         predsAcc _ map                                                            = map
---         blocksWithPreds :: [BasicBlock]
---         blocksWithPreds = map (\block -> block { predecessors = fromMaybe [] $ Map.lookup (label block) preds }) basicBlocks
+insertPredecessors :: Function -> Function
+insertPredecessors (Function name returnTy args basicBlocks) =
+    Function name returnTy args blocksWithPreds
+    where
+        preds :: Map.Map Label [Label]
+        preds = foldr predsAcc Map.empty basicBlocks
+        predsAcc :: BasicBlock -> Map.Map Label [Label] -> Map.Map Label [Label]
+        predsAcc (BasicBlock pred _ _ (BrConditional _ labelTrue labelFalse)) map = insertEdge labelTrue pred $ insertEdge labelFalse pred map
+        predsAcc (BasicBlock pred _ _ (BrUnconditional label)) map                = insertEdge label pred map
+        predsAcc _ map                                                            = map
+        blocksWithPreds :: [BasicBlock]
+        blocksWithPreds = map (\block -> block { predecessors = fromMaybe [] $ Map.lookup (label block) preds }) basicBlocks
 
 insertEdge :: Label -> Label -> Map.Map Label [Label] -> Map.Map Label [Label]
 insertEdge key value = Map.insertWith (++) key [value]

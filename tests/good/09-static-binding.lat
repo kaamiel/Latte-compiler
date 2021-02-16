@@ -1,0 +1,24 @@
+
+int main() {
+    
+    int x = 0;
+
+    {
+        x = 1; // x from line 4
+    }
+
+    {
+        printInt(x); // 0 – x from line 4
+        int x = 3;
+        printInt(x); // 3 – x from line 12
+
+        printInt(x); // 3 – x from line 12
+        x++;
+        printInt(x); // 4 – x from line 12
+    }
+    x = 1;
+
+    printInt(x); // 1 – x from line 4
+
+    return 0;
+}

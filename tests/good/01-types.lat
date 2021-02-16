@@ -1,0 +1,37 @@
+
+// int, string, boolean, void
+
+int getInt() {
+    int result = 21;
+    return result * 2;
+}
+
+string getString() {
+    string result = "a";
+    return result + "bc";
+}
+
+boolean getBool() {
+    boolean result = false;
+    return result || true;
+}
+
+void getVoid() {
+    // return ;
+}
+
+int main() {
+    int i = getInt();
+    string s = getString();
+    boolean b = getBool();
+    getVoid();
+
+    printInt(i);
+    printString(s);
+    if (b) {
+        printString("true");
+    } else {
+        printString("false");
+    }
+    return 0;
+}

@@ -1,0 +1,143 @@
+
+int main() {
+
+    gcse1();
+    gcse2();
+    gcse3();
+    gcse4();
+    gcse5();
+    gcse6();
+    gcse7();
+    gcse8();
+    gcse9();
+    gcse10();
+
+    return 0;
+}
+
+int one() {
+    return 1;
+}
+
+string la() {
+    return "la";
+}
+
+void gcse1() {
+    int k = one();
+
+    printInt(k * 1 + 1);
+    if (k == 1)
+        printInt(k * 1 + 1);
+    boolean b = true;
+    while (b) {
+        printInt(k * 1 + 1);
+        b = false;
+    }
+    int l = k * 1 + 1;
+    printInt(l);
+
+
+    string s = la();
+
+    printString(s + s + s);
+    if (k == 1)
+        printString(s + s + s);
+    b = true;
+    while (b){
+        printString(s + s + s);
+        b = false;
+    }
+    string t = "la" + "la" + "la";
+    printString(t);
+}
+
+void gcse2() {
+    int k = one(), l;
+    if (k < 0) {
+        l = k * 2 + 2;
+        printInt(l);
+    }
+    l = k * 2 + 2;
+    printInt(l);
+}
+
+void gcse3() {
+    int k = one(), l = 1, j;
+    if (l > 0) {
+        j = k * 3 + 3;
+        printInt(j);
+    }
+    j = k * 3 + 3;
+    printInt(j);
+}
+
+void gcse4() {
+    int k = one(), l;
+    if (k > 0) {
+    } else {
+        l = k * 4 + 4;
+        printInt(l);
+    }
+    l = k * 4 + 4;
+    printInt(l);
+}
+
+void gcse5() {
+    int k = one(), l = 1, j;
+    if (l > 0) {
+        j = k * 5 + 5;
+        printInt(j);
+    } else {
+    }
+    j = k * 5 + 5;
+    printInt(j);
+}
+
+void gcse6() {
+    int k = one(), l;
+    boolean b = true;
+    while (k < 0 && b) {
+        l = k * 6 + 6;
+        printInt(l);
+        b = false;
+    }
+    l = k * 6 + 6;
+    printInt(l);
+}
+
+void gcse7() {
+    int k = 0, l = 0;
+    if (one() > 0) {
+        k = 7;
+        l = 7;
+    }
+    printInt(k);
+    printInt(l);
+}
+
+void gcse8() {
+    int k = 0, l = 0;
+    if (one() > 0) {
+        k = 8;
+        l = 8;
+    } else {
+        k = 88;
+        l = 88;
+    }
+    printInt(k);
+    printInt(l);
+}
+
+void gcse9() {
+    int k = one();
+    boolean b1 = k * 9 + 9 > 0;
+    boolean b2 = 0 < k * 9 + 9;
+    printInt(k * 9 + 9);
+}
+
+void gcse10() {
+    int k = one();
+    printInt(k + 10);
+    printInt(10 + k);
+}

@@ -13,6 +13,7 @@ declare i64  @getline(i8**, i64*, %struct._IO_FILE*)
 declare void @exit(i32)
 declare i64  @strlen(i8*)
 declare i8*  @malloc(i64)
+declare void @free(i8*)
 declare i8*  @strcpy(i8*, i8*)
 declare i8*  @strcat(i8*, i8*)
 
@@ -50,15 +51,16 @@ define i8* @readString() {
     %stdin = load %struct._IO_FILE*, %struct._IO_FILE** @stdin
 
     %read = call i64 @getline(i8** %line, i64* %n, %struct._IO_FILE* %stdin)
+    %ret = load i8*, i8** %line
     %getlineErr = icmp eq i64 %read, -1
     br i1 %getlineErr, label %getlineFailure, label %getlineSuccess
 getlineFailure:
     %s = bitcast [22 x i8]* @getlineError to i8*
     call i32 @puts(i8* %s)
+    call void @free(i8* %ret)
     call void @exit(i32 1)
     unreachable
 getlineSuccess:
-    %ret = load i8*, i8** %line
     %newlineIndex = sub i64 %read, 1
     %newlinePointer = getelementptr inbounds i8, i8* %ret, i64 %newlineIndex
     store i8 0, i8* %newlinePointer

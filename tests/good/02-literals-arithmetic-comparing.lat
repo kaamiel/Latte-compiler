@@ -1,0 +1,39 @@
+
+int main() {
+    int i = 49;
+    string s = "aaaab";
+    boolean b = false;
+
+    assert(i < 50 + 1);
+    assert(i <= 50 - 1);
+    assert(i > 49 / 2);
+    assert(i >= 49 + 0);
+    assert(i == 49);
+    assert(i != 1);
+
+    string s2 = s;
+    assert(s == "aaaab");
+    assert(s == s2);
+    assert(s != "a");
+    s2 = s2 + "";
+    assert(s != s2);
+    assert("abc" == "abc");
+    assert("abcd" != "abc");
+
+    assert(b == false);
+    assert(b != true);
+    assert(b <= false || true);
+    // assert(b || true > b && true);
+    assert(b >= b);
+    assert(b == (true && false));
+    assert(b != (b == b));
+
+    return 0;
+}
+
+
+void assert(boolean b) {
+    if (!b) {
+        error();
+    }
+}

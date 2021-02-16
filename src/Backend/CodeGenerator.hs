@@ -7,7 +7,6 @@ import Control.Monad.State
 import AbsLatte
 import Backend.LLVMAsm
 import Backend.Optimizer
-import Debug.Trace -- todo: remove this
 
 
 data VariableValues = VariableValues

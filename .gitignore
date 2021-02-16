@@ -1,0 +1,3 @@
+latc_llvm
+tests/good/*.ll
+tests/good/*.bc

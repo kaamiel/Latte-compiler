@@ -1,0 +1,19 @@
+int main() {
+  int i = 1000 * 1000;
+  {
+    int i = 1;
+    printInt(i);
+  }
+  printInt(i);
+  while (i > 0) {
+    i--;
+   // this is a little tricky
+   // on the right hand side, i refers to the outer i
+   int i = i;
+   if (i % 100000 == 1)
+      printInt(i);
+  }
+  printInt(i);
+  return 0 ;
+
+}
